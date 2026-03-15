@@ -40,7 +40,7 @@ def save_to_sheet(date_str, selections):
     sheet = get_sheet()
     try:
         log = sheet.worksheet('Лог')
-    except:
+    except Exception:
         log = sheet.add_worksheet('Лог', 1000, 10)
         log.append_row(['Дата', '🏋️ Тренировка', '📚 Саморазвитие', '💰 Доп. доход', '🚀 Карьера'])
     row = [date_str]
@@ -107,4 +107,6 @@ def main():
     )
     app.run_polling()
 
-if __nam
+if __name__ == '__main__':
+    main()
+

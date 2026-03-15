@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timedelta
 import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import gspread
 from google.oauth2.service_account import Credentials
 import json
@@ -15,17 +15,11 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get('BOT_TOKEN')
 SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
 GOOGLE_CREDS = os.environ.get('GOOGLE_CREDS')
-CHAT_ID = os.environ.get('CHAT_ID')
 TIMEZONE = 'Europe/Moscow'
 
-HABITS = [
-    ('workout', '🏋️ Тренировка'),
-    ('self_dev', '📚 Саморазвитие'),
-    ('income', '💰 Доп. доход'),
-    ('career', '🚀 Развитие карьеры'),
-]
-
+user_habits = {}
 user_selections = {}
+user_state = {}
 
 
 def get_sheet():
@@ -41,122 +35,262 @@ def get_sheet():
     return client.open_by_key(SPREADSHEET_ID)
 
 
-def save_to_sheet(date_str, selections):
-    sheet = get_sheet()
+def get_user_sheet(sheet, chat_id):
+    name = f'user_{chat_id}'
     try:
-        log = sheet.worksheet('Log')
+        return sheet.worksheet(name)
     except Exception:
-        log = sheet.add_worksheet('Log', 1000, 10)
-        log.append_row(['Date', 'Workout', 'Self-dev', 'Income', 'Career'])
-    row = [date_str]
-    for key, _ in HABITS:
-        row.append('✅' if key in selections else '❌')
-    log.append_row(row)
+        ws = sheet.add_worksheet(name, 1000, 15)
+        ws.append_row(['Дата'] + [f'Привычка {i+1}' for i in range(10)])
+        return ws
 
 
-def get_stats(days):
-    sheet = get_sheet()
+def load_user_habits(chat_id):
+    if chat_id in user_habits:
+        return user_habits[chat_id]
     try:
-        log = sheet.worksheet('Log')
+        sheet = get_sheet()
+        ws = get_user_sheet(sheet, chat_id)
+        header = ws.row_values(1)
+        habits = [h for h in header[1:] if h and not h.startswith('Привычка')]
+        user_habits[chat_id] = habits
+        return habits
+    except Exception:
+        return []
+
+
+def save_user_habits(chat_id, habits):
+    user_habits[chat_id] = habits
+    try:
+        sheet = get_sheet()
+        name = f'user_{chat_id}'
+        try:
+            ws = sheet.worksheet(name)
+            sheet.del_worksheet(ws)
+        except Exception:
+            pass
+        ws = sheet.add_worksheet(name, 1000, 15)
+        ws.append_row(['Дата'] + habits)
+    except Exception as e:
+        logger.error(f'Error saving habits: {e}')
+
+
+def save_checkin(chat_id, date_str, selections, habits):
+    try:
+        sheet = get_sheet()
+        ws = get_user_sheet(sheet, chat_id)
+        row = [date_str] + ['✅' if h in selections else '❌' for h in habits]
+        ws.append_row(row)
+    except Exception as e:
+        logger.error(f'Error saving checkin: {e}')
+
+
+def get_stats(chat_id, days):
+    try:
+        sheet = get_sheet()
+        ws = get_user_sheet(sheet, chat_id)
+        rows = ws.get_all_values()
+        if len(rows) <= 1:
+            return None
+        habits = [h for h in rows[0][1:] if h]
+        tz = pytz.timezone(TIMEZONE)
+        cutoff = (datetime.now(tz) - timedelta(days=days)).strftime('%Y-%m-%d')
+        counts = [0] * len(habits)
+        total = 0
+        for row in rows[1:]:
+            if len(row) < 2:
+                continue
+            if row[0] >= cutoff:
+                total += 1
+                for i in range(len(habits)):
+                    if i + 1 < len(row) and row[i + 1] == '✅':
+                        counts[i] += 1
+        return habits, counts, total
     except Exception:
         return None
-    rows = log.get_all_values()
-    if len(rows) <= 1:
-        return None
-    tz = pytz.timezone(TIMEZONE)
-    cutoff = (datetime.now(tz) - timedelta(days=days)).strftime('%Y-%m-%d')
-    counts = [0, 0, 0, 0]
-    total = 0
-    for row in rows[1:]:
-        if len(row) < 5:
-            continue
-        if row[0] >= cutoff:
-            total += 1
-            for i in range(4):
-                if row[i + 1] == '✅':
-                    counts[i] += 1
-    return counts, total
 
 
-def get_keyboard(selections):
+def get_main_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('✏️ Мои привычки', callback_data='my_habits')],
+        [InlineKeyboardButton('✅ Отметить день', callback_data='checkin')],
+        [InlineKeyboardButton('📊 Статистика', callback_data='stats_menu')],
+    ])
+
+
+def get_checkin_keyboard(habits, selections):
     keyboard = []
-    for key, label in HABITS:
-        check = '✅ ' if key in selections else '☐ '
-        keyboard.append([InlineKeyboardButton(check + label, callback_data=key)])
-    keyboard.append([InlineKeyboardButton('💾 Сохранить', callback_data='save')])
+    for h in habits:
+        check = '✅ ' if h in selections else '☐ '
+        keyboard.append([InlineKeyboardButton(check + h, callback_data=f'toggle_{h}')])
+    keyboard.append([InlineKeyboardButton('💾 Сохранить', callback_data='save_checkin')])
+    keyboard.append([InlineKeyboardButton('« Назад', callback_data='back')])
     return InlineKeyboardMarkup(keyboard)
 
 
-async def send_daily_check(bot):
-    chat_id = CHAT_ID
-    user_selections[chat_id] = set()
-    await bot.send_message(
-        chat_id=chat_id,
-        text='Привет! Отмечай, чему уделила время сегодня 👇\n\n(нажимай на пункты, потом жми Сохранить)',
-        reply_markup=get_keyboard(set())
-    )
+def get_stats_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('За 7 дней', callback_data='stats_7')],
+        [InlineKeyboardButton('За 30 дней', callback_data='stats_30')],
+        [InlineKeyboardButton('За 365 дней', callback_data='stats_365')],
+        [InlineKeyboardButton('« Назад', callback_data='back')],
+    ])
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-    user_selections[chat_id] = set()
-    await update.message.reply_text(
-        'Привет! Я буду каждый вечер спрашивать про твои привычки 👇',
-        reply_markup=get_keyboard(set())
-    )
-
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Считаю статистику...')
-    try:
-        r7 = get_stats(7)
-        r30 = get_stats(30)
-        lines = ['📊 Твоя статистика\n']
-        for label, result in [('За 7 дней', r7), ('За 30 дней', r30)]:
-            lines.append(f'*{label}*')
-            if not result:
-                lines.append('Нет данных\n')
-                continue
-            counts, total = result
-            for i, (_, habit) in enumerate(HABITS):
-                lines.append(f'{habit}: {counts[i]} из {total}')
-            lines.append('')
-        await update.message.reply_text('\n'.join(lines), parse_mode='Markdown')
-    except Exception:
-        await update.message.reply_text('Не удалось загрузить статистику 😔')
+    name = update.effective_user.first_name or 'друг'
+    habits = load_user_habits(chat_id)
+    if not habits:
+        await update.message.reply_text(
+            f'Привет, {name}! 👋\n\nЯ помогу отслеживать твои привычки.\n\nДля начала добавь привычки — нажми кнопку ниже.',
+            reply_markup=get_main_keyboard()
+        )
+    else:
+        await update.message.reply_text(
+            f'Привет, {name}! 👋\n\nЧто делаем?',
+            reply_markup=get_main_keyboard()
+        )
 
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     chat_id = str(query.message.chat_id)
-    if chat_id not in user_selections:
+    data = query.data
+
+    if data == 'back':
+        await query.edit_message_text('Что делаем?', reply_markup=get_main_keyboard())
+
+    elif data == 'my_habits':
+        habits = load_user_habits(chat_id)
+        text = '✏️ Твои привычки:\n\n'
+        if habits:
+            text += '\n'.join(f'{i+1}. {h}' for i, h in enumerate(habits))
+        else:
+            text += 'Пока нет привычек.'
+        text += '\n\nЧтобы задать новый список — напиши мне привычки через запятую.\nНапример: Зарядка, Чтение, Медитация\n\n(максимум 10 штук)'
+        user_state[chat_id] = 'waiting_habits'
+        await query.edit_message_text(text)
+
+    elif data == 'checkin':
+        habits = load_user_habits(chat_id)
+        if not habits:
+            await query.edit_message_text(
+                'Сначала добавь привычки! Нажми "Мои привычки".',
+                reply_markup=get_main_keyboard()
+            )
+            return
         user_selections[chat_id] = set()
-    if query.data == 'save':
+        await query.edit_message_text(
+            'Отмечай что сделала сегодня 👇',
+            reply_markup=get_checkin_keyboard(habits, set())
+        )
+
+    elif data.startswith('toggle_'):
+        habit = data[7:]
+        if chat_id not in user_selections:
+            user_selections[chat_id] = set()
+        if habit in user_selections[chat_id]:
+            user_selections[chat_id].remove(habit)
+        else:
+            user_selections[chat_id].add(habit)
+        habits = load_user_habits(chat_id)
+        await query.edit_message_reply_markup(
+            get_checkin_keyboard(habits, user_selections[chat_id])
+        )
+
+    elif data == 'save_checkin':
+        habits = load_user_habits(chat_id)
+        selections = user_selections.get(chat_id, set())
         tz = pytz.timezone(TIMEZONE)
         date_str = datetime.now(tz).strftime('%Y-%m-%d')
-        save_to_sheet(date_str, user_selections[chat_id])
-        done = [label for key, label in HABITS if key in user_selections[chat_id]]
+        save_checkin(chat_id, date_str, selections, habits)
+        done = [h for h in habits if h in selections]
         if done:
             text = '✅ Сохранено!\n\nСегодня ты уделила время:\n' + '\n'.join(done)
         else:
             text = '✅ Сохранено!\nСегодня — день отдыха 😴'
-        await query.edit_message_text(text)
         user_selections[chat_id] = set()
-        return
-    if query.data in [k for k, _ in HABITS]:
-        if query.data in user_selections[chat_id]:
-            user_selections[chat_id].remove(query.data)
-        else:
-            user_selections[chat_id].add(query.data)
-        await query.edit_message_reply_markup(get_keyboard(user_selections[chat_id]))
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton('« В меню', callback_data='back')]
+        ]))
+
+    elif data == 'stats_menu':
+        await query.edit_message_text('За какой период?', reply_markup=get_stats_keyboard())
+
+    elif data.startswith('stats_'):
+        days = int(data.split('_')[1])
+        result = get_stats(chat_id, days)
+        if not result:
+            await query.edit_message_text(
+                'Нет данных пока. Сначала отметь несколько дней!',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('« Назад', callback_data='stats_menu')]])
+            )
+            return
+        habits, counts, total = result
+        lines = [f'📊 Статистика за {days} дней\n']
+        for i, h in enumerate(habits):
+            pct = round(counts[i] / total * 100) if total > 0 else 0
+            lines.append(f'{h}: {counts[i]} из {total} ({pct}%)')
+        await query.edit_message_text(
+            '\n'.join(lines),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton('« Назад', callback_data='stats_menu')]
+            ])
+        )
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    state = user_state.get(chat_id)
+
+    if state == 'waiting_habits':
+        text = update.message.text
+        habits = [h.strip() for h in text.split(',') if h.strip()][:10]
+        if not habits:
+            await update.message.reply_text(
+                'Не понял 🤔 Напиши привычки через запятую, например:\nЗарядка, Чтение, Медитация'
+            )
+            return
+        save_user_habits(chat_id, habits)
+        user_state[chat_id] = None
+        await update.message.reply_text(
+            f'Отлично! Сохранила {len(habits)} привычек:\n' + '\n'.join(f'• {h}' for h in habits) +
+            '\n\nКаждый день в 23:00 я буду напоминать тебе их отметить 👇',
+            reply_markup=get_main_keyboard()
+        )
+    else:
+        await update.message.reply_text('Что делаем?', reply_markup=get_main_keyboard())
+
+
+async def send_daily_check(bot):
+    try:
+        sheet = get_sheet()
+        worksheets = sheet.worksheets()
+        for ws in worksheets:
+            if ws.title.startswith('user_'):
+                chat_id = ws.title.replace('user_', '')
+                try:
+                    habits = load_user_habits(chat_id)
+                    if habits:
+                        user_selections[chat_id] = set()
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text='Привет! Отмечай, чему уделила время сегодня 👇',
+                            reply_markup=get_checkin_keyboard(habits, set())
+                        )
+                except Exception as e:
+                    logger.error(f'Error sending to {chat_id}: {e}')
+    except Exception as e:
+        logger.error(f'Error in send_daily_check: {e}')
 
 
 async def scheduler(bot):
     tz = pytz.timezone(TIMEZONE)
     while True:
         now = datetime.now(tz)
-        if now.hour == 21 and now.minute == 0:
+        if now.hour == 23 and now.minute == 0:
             await send_daily_check(bot)
             await asyncio.sleep(61)
         else:
@@ -170,8 +304,8 @@ async def post_init(application: Application):
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('stats', stats))
     app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.run_polling(drop_pending_updates=True)
 
 

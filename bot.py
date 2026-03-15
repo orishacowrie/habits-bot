@@ -22,6 +22,14 @@ user_notify_hour = {}
 user_selections = {}
 user_state = {}
 
+HELP_TEXT = (
+    "Here's what I can do:\n\n"
+    "/stats — see your progress\n"
+    "/list — view or update your habit list\n"
+    "/time — change your daily reminder time\n"
+    "/help — show this message"
+)
+
 
 def get_sheet():
     creds_dict = json.loads(GOOGLE_CREDS)
@@ -149,6 +157,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(HELP_TEXT)
+
+
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     habits, hour = load_user_data(chat_id)
@@ -159,6 +171,16 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += '\n\nWrite a new list separated by commas to replace it:'
     user_state[chat_id] = 'waiting_habits'
     await update.message.reply_text(text)
+
+
+async def cmd_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    _, hour = load_user_data(chat_id)
+    user_state[chat_id] = 'waiting_hour'
+    await update.message.reply_text(
+        f'Your current reminder time is {hour:02d}:00 (Moscow).\n\n'
+        f'Write a new hour (numbers only, e.g. 20):'
+    )
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -245,12 +267,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f'All set! You will receive your first check-in at {hour:02d}:00.\n\n'
             f'Use /stats to see your progress, '
-            f'use /list to update your habit list.'
+            f'use /list to update your habit list, '
+            f'use /time to change the reminder time.\n\n'
+            f'Type /help anytime to see all commands.'
         )
 
     else:
         await update.message.reply_text(
-            'Use /stats to see your progress or /list to update your habits.'
+            'Not sure what to do? Type /help to see all available commands.'
         )
 
 
@@ -296,7 +320,9 @@ async def post_init(application: Application):
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler('start', start))
+    app.add_handler(CommandHandler('help', cmd_help))
     app.add_handler(CommandHandler('list', cmd_list))
+    app.add_handler(CommandHandler('time', cmd_time))
     app.add_handler(CommandHandler('stats', cmd_stats))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

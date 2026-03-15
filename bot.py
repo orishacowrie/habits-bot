@@ -1,9 +1,9 @@
 import os
 import logging
-from datetime import datetime, time
+from datetime import datetime
 import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, JobQueue
 import gspread
 from google.oauth2.service_account import Credentials
 import json
@@ -102,10 +102,10 @@ def main():
     tz = pytz.timezone(TIMEZONE)
     app.job_queue.run_daily(
         send_daily_check,
-        time=time(hour=21, minute=0, tzinfo=tz),
+        time=datetime.now(tz).replace(hour=21, minute=0, second=0, microsecond=0).timetz(),
         days=(0, 1, 2, 3, 4, 5, 6)
     )
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()

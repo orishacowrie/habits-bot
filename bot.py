@@ -3,10 +3,11 @@ import logging
 from datetime import datetime
 import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, JobQueue
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 import gspread
 from google.oauth2.service_account import Credentials
 import json
+import asyncio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -56,10 +57,10 @@ def get_keyboard(selections):
     keyboard.append([InlineKeyboardButton('💾 Сохранить', callback_data='save')])
     return InlineKeyboardMarkup(keyboard)
 
-async def send_daily_check(context: ContextTypes.DEFAULT_TYPE):
+async def send_daily_check(bot):
     chat_id = CHAT_ID
     user_selections[chat_id] = set()
-    await context.bot.send_message(
+    await bot.send_message(
         chat_id=chat_id,
         text='Привет! Отмечай, чему уделила время сегодня 👇\n\n(нажимай на пункты, потом жми Сохранить)',
         reply_markup=get_keyboard(set())
@@ -95,18 +96,24 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_selections[chat_id].add(query.data)
         await query.edit_message_reply_markup(get_keyboard(user_selections[chat_id]))
 
+async def scheduler(bot):
+    tz = pytz.timezone(TIMEZONE)
+    while True:
+        now = datetime.now(tz)
+        if now.hour == 21 and now.minute == 0:
+            await send_daily_check(bot)
+            await asyncio.sleep(61)
+        else:
+            await asyncio.sleep(30)
+
+async def post_init(application: Application):
+    asyncio.create_task(scheduler(application.bot))
+
 def main():
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CallbackQueryHandler(button))
-    tz = pytz.timezone(TIMEZONE)
-    app.job_queue.run_daily(
-        send_daily_check,
-        time=datetime.now(tz).replace(hour=21, minute=0, second=0, microsecond=0).timetz(),
-        days=(0, 1, 2, 3, 4, 5, 6)
-    )
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
-

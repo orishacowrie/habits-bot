@@ -42,7 +42,7 @@ def get_user_sheet(sheet, chat_id):
         return sheet.worksheet(name)
     except Exception:
         ws = sheet.add_worksheet(name, 1000, 15)
-        ws.append_row(['Дата', 'notify_hour'] + [f'Привычка {i+1}' for i in range(10)])
+        ws.append_row(['Date', 'notify_hour'] + [f'Habit {i+1}' for i in range(10)])
         return ws
 
 
@@ -58,7 +58,7 @@ def load_user_data(chat_id):
         for h in header[1:]:
             if h.startswith('notify_hour:'):
                 hour = int(h.replace('notify_hour:', ''))
-            elif h and not h.startswith('Привычка') and h != 'notify_hour':
+            elif h and not h.startswith('Habit') and h != 'notify_hour':
                 habits.append(h)
         user_habits[chat_id] = habits
         user_notify_hour[chat_id] = hour
@@ -79,7 +79,7 @@ def save_user_data(chat_id, habits, hour):
         except Exception:
             pass
         ws = sheet.add_worksheet(name, 1000, 15)
-        ws.append_row(['Дата', f'notify_hour:{hour}'] + habits)
+        ws.append_row(['Date', f'notify_hour:{hour}'] + habits)
     except Exception as e:
         logger.error(f'Error saving user data: {e}')
 
@@ -103,7 +103,7 @@ def get_stats(chat_id, days):
             return None
         habits = []
         for h in rows[0][2:]:
-            if h and not h.startswith('Привычка'):
+            if h and not h.startswith('Habit'):
                 habits.append(h)
         if not habits:
             return None
@@ -129,15 +129,15 @@ def get_checkin_keyboard(habits, selections):
     for h in habits:
         check = '✅ ' if h in selections else '☐ '
         keyboard.append([InlineKeyboardButton(check + h, callback_data=f'toggle_{h}')])
-    keyboard.append([InlineKeyboardButton('Сохранить', callback_data='save_checkin')])
+    keyboard.append([InlineKeyboardButton('Save', callback_data='save_checkin')])
     return InlineKeyboardMarkup(keyboard)
 
 
 def get_stats_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('За 7 дней', callback_data='stats_7')],
-        [InlineKeyboardButton('За 30 дней', callback_data='stats_30')],
-        [InlineKeyboardButton('За 365 дней', callback_data='stats_365')],
+        [InlineKeyboardButton('Last 7 days', callback_data='stats_7')],
+        [InlineKeyboardButton('Last 30 days', callback_data='stats_30')],
+        [InlineKeyboardButton('Last 365 days', callback_data='stats_365')],
     ])
 
 
@@ -145,7 +145,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     user_state[chat_id] = 'waiting_habits'
     await update.message.reply_text(
-        'Напиши через запятую привычки, которые ты хочешь отслеживать каждый день'
+        'Write the habits you want to track every day, separated by commas'
     )
 
 
@@ -153,16 +153,16 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     habits, hour = load_user_data(chat_id)
     if not habits:
-        text = 'У тебя пока нет списка привычек.'
+        text = 'You have no habits set yet.'
     else:
-        text = 'Твои текущие привычки:\n' + '\n'.join(f'- {h}' for h in habits)
-    text += '\n\nНапиши новый список через запятую, чтобы заменить:'
+        text = 'Your current habits:\n' + '\n'.join(f'- {h}' for h in habits)
+    text += '\n\nWrite a new list separated by commas to replace it:'
     user_state[chat_id] = 'waiting_habits'
     await update.message.reply_text(text)
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('За какой период?', reply_markup=get_stats_keyboard())
+    await update.message.reply_text('Choose a time period:', reply_markup=get_stats_keyboard())
 
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -192,9 +192,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_checkin(chat_id, date_str, selections, habits)
         done = [h for h in habits if h in selections]
         if done:
-            text = 'Сохранено!\n\nСегодня выполнено:\n' + '\n'.join(f'- {h}' for h in done)
+            text = 'Saved!\n\nCompleted today:\n' + '\n'.join(f'- {h}' for h in done)
         else:
-            text = 'Сохранено! Сегодня — день отдыха.'
+            text = 'Saved! Rest day.'
         user_selections[chat_id] = set()
         await query.edit_message_text(text)
 
@@ -203,14 +203,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = get_stats(chat_id, days)
         if not result:
             await query.edit_message_text(
-                'Нет данных пока. Сначала отметь несколько дней!'
+                'No data yet. Complete a few check-ins first!'
             )
             return
         habits, counts, total = result
-        lines = [f'Статистика за {days} дней:\n']
+        lines = [f'Stats for the last {days} days:\n']
         for i, h in enumerate(habits):
             pct = round(counts[i] / total * 100) if total > 0 else 0
-            lines.append(f'- {h}: {counts[i]} из {total} ({pct}%)')
+            lines.append(f'- {h}: {counts[i]} of {total} ({pct}%)')
         await query.edit_message_text('\n'.join(lines))
 
 
@@ -223,19 +223,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         habits = [h.strip() for h in text.split(',') if h.strip()][:10]
         if not habits:
             await update.message.reply_text(
-                'Не понял. Напиши привычки через запятую, например:\nЗарядка, Чтение, Медитация'
+                'Could not understand. Write habits separated by commas, for example:\nWorkout, Reading, Meditation'
             )
             return
         user_habits[chat_id] = habits
         user_state[chat_id] = 'waiting_hour'
         await update.message.reply_text(
-            'В котором часу присылать напоминание? (по Москве, только цифры, например: 21)'
+            'What time should I send you the daily reminder? (Moscow time, numbers only, e.g. 21)'
         )
 
     elif state == 'waiting_hour':
         if not text.isdigit() or not (0 <= int(text) <= 23):
             await update.message.reply_text(
-                'Напиши только число от 0 до 23, например: 21'
+                'Please write a number between 0 and 23, e.g. 21'
             )
             return
         hour = int(text)
@@ -243,14 +243,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user_data(chat_id, habits, hour)
         user_state[chat_id] = None
         await update.message.reply_text(
-            f'Всё принято! В {hour:02d}:00 ты получишь свой первый опросник.\n\n'
-            f'После заполнения используй /stats чтобы видеть прогресс, '
-            f'используй /list чтобы менять список привычек.'
+            f'All set! You will receive your first check-in at {hour:02d}:00.\n\n'
+            f'Use /stats to see your progress, '
+            f'use /list to update your habit list.'
         )
 
     else:
         await update.message.reply_text(
-            'Используй /stats для статистики или /list чтобы изменить список привычек.'
+            'Use /stats to see your progress or /list to update your habits.'
         )
 
 
@@ -269,7 +269,7 @@ async def send_daily_check(bot):
                         user_selections[chat_id] = set()
                         await bot.send_message(
                             chat_id=chat_id,
-                            text='Привет! Отмечай, что выполнила сегодня:',
+                            text='Hey! Mark what you completed today:',
                             reply_markup=get_checkin_keyboard(habits, set())
                         )
                 except Exception as e:
